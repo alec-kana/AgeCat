@@ -1,6 +1,6 @@
 [project]
 name = "agecat"
-version = "0.3.0"
+version = "0.4.0"
 description = "AGE (agedm) anime downloader CLI with resumable MP4 and HLS downloads."
 authors = [
     {name = "HeiTang",email = "heitang.me@gmail.com"},

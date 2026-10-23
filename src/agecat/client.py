@@ -91,11 +91,6 @@ class AgeClient:
         response.close()
         return response.url
 
-    def get_document(self, url: str, *, page_url: str | None = None) -> requests.Response:
-        """Fetch a page as a navigation; the response's ``url`` is where redirects ended."""
-
-        return self.request("GET", url, page_url=page_url or site_root(url), dest="document")
-
     def get_frame(self, url: str, *, page_url: str) -> str:
         """Fetch an embedded player page as the iframe inside ``page_url`` would."""
 
