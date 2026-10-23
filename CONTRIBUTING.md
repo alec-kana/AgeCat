@@ -10,6 +10,7 @@ src/agecat/
 ├── client.py         # HTTP session、超时、重试、节奏控制、请求身份头
 ├── extractor.py      # 详情页 / 播放页解析、播放源排序与切换
 ├── player.py         # 第三方解析播放器（/vip/ 解密、/m3u8/）
+├── aes.py            # AES-CBC：纯 Python 实现，装有 pycryptodome/cryptography 时自动加速
 ├── downloader.py     # MP4 Range 续传、Content-Range 校验、原子写入
 ├── hls.py            # m3u8 解析、分片下载与解密、去广告、ffmpeg 封装
 ├── progress.py       # Rich / 纯文本进度
@@ -50,5 +51,6 @@ AGECAT_RUN_INTEGRATION=1 python3 -m unittest tests.test_integration_smoke -v
 ## 约定
 
 - 用户可见的文字（README、提示语）使用简体中文；代码、注释、日志使用英文。
+- 必须能在 iOS a-Shell 上运行：运行时依赖只能是纯 Python 包（a-Shell 的 pip 无法安装 C 扩展），不能假设 `subprocess`、`git` 或 `PATH` 中的程序一定可用。
 - 解析逻辑放在纯函数里（输入 HTML/文本，输出数据），方便用 `tests/fakes.py` 测试。
 - 不要在日志中输出签名链接或密钥的值。

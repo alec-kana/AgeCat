@@ -33,27 +33,74 @@ AgeCat 能把 AGE 动漫的单集或整部动画下载为本地 MP4 文件，支
 
 ## 安装
 
-需要 Python 3.12 以上。HLS 源需要 [ffmpeg](https://ffmpeg.org/) 才能输出 MP4（西瓜源不需要）。
+需要 Python 3.12 以上。所有依赖（requests、beautifulsoup4、rich）都是纯 Python，可以在 iOS 的 a-Shell 中直接安装。
+
+### A. iOS a-Shell / 没有 git 的环境（推荐手机使用）
+
+a-Shell 没有内置 `git`，用 tarball 安装：
 
 ```bash
-python3 -m pip install "git+https://github.com/alec-kana/AgeCat.git@main"
+python3 -m pip install https://github.com/alec-kana/AgeCat/archive/refs/heads/main.tar.gz
 agecat --help
 ```
 
-> 本仓库为私有仓库，安装前需要先在本机登录有权限的 GitHub 账号（例如 `gh auth login`）。
+建议先 `cd ~/Documents` 再下载，这样文件会出现在「文件」App 的 a-Shell 目录里，可以直接用其他播放器打开。
 
-本地开发安装：
+### B. 电脑（有 git）
+
+```bash
+python3 -m pip install "git+https://github.com/alec-kana/AgeCat.git@main"
+```
+
+电脑上可以额外安装 C 加速的 AES（只影响加密的 m3u8 源，如红牛）：
+
+```bash
+python3 -m pip install "agecat[fast] @ git+https://github.com/alec-kana/AgeCat.git@main"
+```
+
+### 更新
+
+跟随 main 分支安装时版本号不一定变化，需要强制重装：
+
+```bash
+# a-Shell
+python3 -m pip install --upgrade --force-reinstall --no-cache-dir https://github.com/alec-kana/AgeCat/archive/refs/heads/main.tar.gz
+
+# 电脑
+python3 -m pip install --upgrade --force-reinstall --no-cache-dir "git+https://github.com/alec-kana/AgeCat.git@main"
+```
+
+### 关于 ffmpeg
+
+- 西瓜源本身就是 MP4，**不需要 ffmpeg**。
+- m3u8 源需要 ffmpeg 把分片封装成 MP4。AgeCat 会依次尝试 `AGECAT_FFMPEG` 环境变量、`PATH` 中的 `ffmpeg`，最后直接尝试运行 `ffmpeg` 命令（a-Shell 内置的 ffmpeg 就是这样找到的）。
+- 都找不到或封装失败时，会保存为 `.ts`。VLC、Infuse 等播放器可以直接播放 `.ts`，也可以之后自己用 ffmpeg 转换。
+
+### 在 a-Shell 上的进度显示
+
+a-Shell 会自称支持终端重绘，但实际上 Rich 进度条不会实时刷新，画面会卡在 `0/N` 直到全部结束。请加上 `--plain-progress` 改为逐行输出进度：
+
+```bash
+agecat https://www.agedm.io/detail/20260096 --plain-progress
+```
+
+不想每次都输入的话，把环境变量写进 a-Shell 每次启动都会执行的 `~/Documents/.profile`（执行一次即可）：
+
+```bash
+echo 'export AGECAT_PLAIN_PROGRESS=1' >> ~/Documents/.profile
+```
+
+### 在手机上的速度
+
+- 西瓜源（MP4）和未加密的 m3u8 源速度只取决于网络。
+- 加密的 m3u8 源（如红牛）在 a-Shell 上用纯 Python 解密，大约每秒 1 MB 左右，一集可能多花几分钟。默认优先使用西瓜源，一般不会用到。
+
+### 本地开发安装
 
 ```bash
 git clone https://github.com/alec-kana/AgeCat.git
 cd AgeCat
 python3 -m pip install -e .
-```
-
-更新（跟随 main 分支安装时版本号不一定变化，需要强制重装）：
-
-```bash
-python3 -m pip install --upgrade --force-reinstall --no-cache-dir "git+https://github.com/alec-kana/AgeCat.git@main"
 ```
 
 ## 使用方法
@@ -146,4 +193,8 @@ AGECAT_RUN_INTEGRATION=1 python3 -m unittest tests.test_integration_smoke
 
 ## 授权
 
-GPL-3.0，见 [LICENSE](LICENSE)。原始框架来自 [HeiTang/AniCat-v2](https://github.com/HeiTang/AniCat-v2)。
+[GPL-3.0](LICENSE)。
+
+AgeCat 的下载、续传、节奏控制等框架来自 [HeiTang/AniCat-v2](https://github.com/HeiTang/AniCat-v2)（GPL-3.0），作为其衍生作品同样以 GPL-3.0 发布：可以自由使用、修改和分发，但分发修改版时必须同样开源并保留本授权。
+
+本项目仅供学习与个人使用，视频内容的版权归原权利人所有。

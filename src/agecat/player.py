@@ -22,9 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import unquote, urljoin, urlsplit
 
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
-
+from .aes import cbc_decrypt, cbc_encrypt
 from .errors import ParseError
 
 PlayerKind = Literal["vip", "m3u8"]
@@ -203,15 +201,13 @@ def parse_vip_response(payload: Any, config: VipPlayerConfig) -> PlayerStream:
 def hxm_encrypt(text: str) -> str:
     """Encrypt text exactly like the player's ``hxm_encrypt`` (lowercase hex)."""
 
-    cipher = AES.new(PARAMS_KEY, AES.MODE_CBC, iv=PARAMS_KEY)
-    return cipher.encrypt(pad(text.encode("utf-8"), AES.block_size)).hex()
+    return cbc_encrypt(PARAMS_KEY, PARAMS_KEY, text.encode("utf-8")).hex()
 
 
 def hxm_decrypt(hex_text: str) -> str:
     """Decrypt hex produced by :func:`hxm_encrypt`."""
 
-    cipher = AES.new(PARAMS_KEY, AES.MODE_CBC, iv=PARAMS_KEY)
-    return unpad(cipher.decrypt(bytes.fromhex(hex_text)), AES.block_size).decode("utf-8")
+    return cbc_decrypt(PARAMS_KEY, PARAMS_KEY, bytes.fromhex(hex_text)).decode("utf-8")
 
 
 def decrypt_api_data(hex_data: str, key_material: str) -> str:
@@ -219,8 +215,7 @@ def decrypt_api_data(hex_data: str, key_material: str) -> str:
 
     key = key_material[:16].encode("latin-1")
     iv = key_material[16:32].encode("latin-1")
-    cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-    return unpad(cipher.decrypt(bytes.fromhex(hex_data)), AES.block_size).decode("utf-8")
+    return cbc_decrypt(key, iv, bytes.fromhex(hex_data)).decode("utf-8")
 
 
 def _player_variable(html: str, name: str) -> str | None:

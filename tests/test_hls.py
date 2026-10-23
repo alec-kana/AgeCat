@@ -6,9 +6,8 @@ from typing import cast
 from unittest import mock
 
 import requests
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
 
+from agecat.aes import cbc_encrypt
 from agecat.errors import AccessDeniedError, DownloadError, ParseError
 from agecat.hls import (
     Segment,
@@ -16,7 +15,9 @@ from agecat.hls import (
     best_variant,
     decrypt_segment,
     download_hls_episode,
+    ffmpeg_runs,
     filter_ad_segments,
+    find_ffmpeg,
     hls_work_dir,
     parse_master_playlist,
     parse_media_playlist,
@@ -55,7 +56,7 @@ seg3.ts
 
 
 def encrypt(data: bytes, iv: bytes) -> bytes:
-    return AES.new(KEY, AES.MODE_CBC, iv=iv).encrypt(pad(data, AES.block_size))
+    return cbc_encrypt(KEY, iv, data)
 
 
 def segment(uri: str, duration: float, group: int, sequence: int = 0) -> Segment:
@@ -323,6 +324,46 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(result.path.suffix, ".ts")
             self.assertEqual(result.path.read_bytes(), b"<0>")
         self.assertIn("remux failed", "".join(logs.output))
+
+
+class FindFfmpegTests(unittest.TestCase):
+    def setUp(self) -> None:
+        ffmpeg_runs.cache_clear()
+
+    def tearDown(self) -> None:
+        ffmpeg_runs.cache_clear()
+
+    def test_environment_variable_wins(self):
+        with mock.patch.dict("os.environ", {"AGECAT_FFMPEG": "/opt/ffmpeg"}):
+            self.assertEqual(find_ffmpeg(), "/opt/ffmpeg")
+
+    def test_path_lookup_comes_next(self):
+        with (
+            mock.patch.dict("os.environ", {"AGECAT_FFMPEG": ""}),
+            mock.patch("agecat.hls.shutil.which", return_value="/usr/bin/ffmpeg"),
+        ):
+            self.assertEqual(find_ffmpeg(), "/usr/bin/ffmpeg")
+
+    def test_bare_command_is_used_when_it_runs(self):
+        # a-Shell: ffmpeg is a built-in command that which() cannot see.
+        with (
+            mock.patch.dict("os.environ", {"AGECAT_FFMPEG": ""}),
+            mock.patch("agecat.hls.shutil.which", return_value=None),
+            mock.patch("agecat.hls.subprocess.run") as run,
+        ):
+            run.return_value.returncode = 0
+            self.assertEqual(find_ffmpeg(), "ffmpeg")
+
+    def test_unavailable_or_unsupported_subprocess_means_no_ffmpeg(self):
+        for error in (FileNotFoundError("ffmpeg"), NotImplementedError()):
+            ffmpeg_runs.cache_clear()
+            with (
+                self.subTest(error=type(error).__name__),
+                mock.patch.dict("os.environ", {"AGECAT_FFMPEG": ""}),
+                mock.patch("agecat.hls.shutil.which", return_value=None),
+                mock.patch("agecat.hls.subprocess.run", side_effect=error),
+            ):
+                self.assertIsNone(find_ffmpeg())
 
 
 if __name__ == "__main__":

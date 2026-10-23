@@ -2,9 +2,7 @@ import hashlib
 import json
 import unittest
 
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
-
+from agecat.aes import cbc_encrypt
 from agecat.errors import ParseError
 from agecat.player import (
     VipPlayerConfig,
@@ -34,10 +32,9 @@ PLAYER_URL = "https://jx.wuzhoupai.com:8443/vip/?url=age_abc"
 
 
 def encrypt_api_data(plaintext: str, key_material: str) -> str:
-    cipher = AES.new(
-        key_material[:16].encode("latin-1"), AES.MODE_CBC, iv=key_material[16:32].encode("latin-1")
-    )
-    return cipher.encrypt(pad(plaintext.encode(), AES.block_size)).hex().upper()
+    key = key_material[:16].encode("latin-1")
+    iv = key_material[16:32].encode("latin-1")
+    return cbc_encrypt(key, iv, plaintext.encode()).hex().upper()
 
 
 class PlayerTests(unittest.TestCase):

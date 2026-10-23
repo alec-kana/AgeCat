@@ -13,6 +13,12 @@
 - 自动跟随新域名：通过 `age.tv` 等固定域名的跳转找到当前站点，旧域名链接自动改写；`--base-url` 可手动指定。
 - 新增参数：`--source`、`--base-url`、`--segment-concurrency`、`--keep-ads`、`--ffmpeg`；环境变量 `AGECAT_FFMPEG`、`AGECAT_PLAIN_PROGRESS`。
 
+### Platform
+
+- 依赖全部为纯 Python（requests、beautifulsoup4、rich），可在 iOS a-Shell 中用 tarball 安装；AES 内置纯 Python 实现，装有 pycryptodome / cryptography 时自动使用（可选 `agecat[fast]`）。
+- ffmpeg 不在 `PATH` 时会直接尝试运行 `ffmpeg`（a-Shell 内置命令）；不可用时 HLS 集数保存为 `.ts`。
+- 以 GPL-3.0 授权发布（沿用 AniCat-v2）。
+
 ### Removed
 
 - Anime1（anime1.me / anime1.pw）支持。

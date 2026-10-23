@@ -17,15 +17,15 @@ import subprocess
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from threading import Lock
 from typing import Literal, Protocol
 from urllib.parse import urljoin, urlsplit
 
 import requests
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
 
+from .aes import BLOCK_SIZE, cbc_decrypt
 from .constants import DEFAULT_SEGMENT_CONCURRENCY, FFMPEG_ENV_VAR
 from .downloader import output_paths, sanitize_filename, skipped_result
 from .errors import DownloadError, ParseError
@@ -36,6 +36,7 @@ ATTRIBUTE_PATTERN = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 # Ad breaks spliced into mirror playlists are short and served from elsewhere.
 AD_GROUP_MAX_DURATION = 120.0
 MANIFEST_NAME = "source.txt"
+FFMPEG_COMMAND = "ffmpeg"
 JOINED_NAME = "joined.ts"
 LOGGER = logging.getLogger(__name__)
 
@@ -281,12 +282,29 @@ def segment_origin(uri: str) -> str:
 
 
 def find_ffmpeg() -> str | None:
-    """Return the ffmpeg executable from ``AGECAT_FFMPEG`` or ``PATH``."""
+    """Return the ffmpeg to use: ``AGECAT_FFMPEG``, ``PATH``, or a runnable bare ``ffmpeg``.
+
+    a-Shell on iOS ships ffmpeg as a built-in command rather than a file on
+    ``PATH``, so the last resort is simply trying to run it.
+    """
 
     configured = os.environ.get(FFMPEG_ENV_VAR, "").strip()
     if configured:
         return configured
-    return shutil.which("ffmpeg")
+    return shutil.which("ffmpeg") or (FFMPEG_COMMAND if ffmpeg_runs(FFMPEG_COMMAND) else None)
+
+
+@cache
+def ffmpeg_runs(command: str) -> bool:
+    """Return whether ``command -version`` runs successfully (checked once per process)."""
+
+    try:
+        result = subprocess.run(
+            [command, "-version"], capture_output=True, text=True, check=False, timeout=30
+        )
+    except (OSError, ValueError, subprocess.SubprocessError, NotImplementedError):
+        return False
+    return result.returncode == 0
 
 
 def hls_work_dir(output_dir: Path, title: str) -> Path:
@@ -463,11 +481,10 @@ def fetch_segment_bytes(
 def decrypt_segment(data: bytes, key: bytes, iv: bytes) -> bytes:
     """Decrypt an AES-128-CBC segment and strip its PKCS#7 padding."""
 
-    if len(data) % AES.block_size:
+    if len(data) % BLOCK_SIZE:
         raise DownloadError(f"encrypted segment size {len(data)} is not a block multiple")
-    decrypted = AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data)
     try:
-        return unpad(decrypted, AES.block_size)
+        return cbc_decrypt(key, iv, data)
     except ValueError as error:
         raise DownloadError("segment decryption failed (bad key or IV)") from error
 
@@ -541,8 +558,9 @@ def remux_to_mp4(ffmpeg: str, source: Path, target: Path) -> str | None:
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=False)
-    except OSError as error:
-        return str(error)
+    except (OSError, ValueError, subprocess.SubprocessError, NotImplementedError) as error:
+        # Sandboxed Pythons (a-Shell) may not support subprocesses at all.
+        return str(error) or type(error).__name__
     if result.returncode == 0:
         return None
     last_line = (result.stderr or "").strip().splitlines()[-1:]
