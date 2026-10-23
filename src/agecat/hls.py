@@ -45,6 +45,9 @@ MANIFEST_NAME = "source.txt"
 FFMPEG_COMMAND = "ffmpeg"
 JOINED_NAME = "joined.ts"
 LOGGER = logging.getLogger(__name__)
+# a-Shell runs ffmpeg inside the app process, where two concurrent runs crash
+# each other (bus error, I/O error). Remuxing is fast, so always run one at a time.
+REMUX_LOCK = Lock()
 
 ProgressCallback = Callable[[DownloadProgressEvent], None]
 
@@ -572,7 +575,8 @@ def remux_to_mp4(ffmpeg: str, source: Path, target: Path) -> str | None:
         str(target),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        with REMUX_LOCK:
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
     except (OSError, ValueError, subprocess.SubprocessError, NotImplementedError) as error:
         # Sandboxed Pythons (a-Shell) may not support subprocesses at all.
         return str(error) or type(error).__name__
