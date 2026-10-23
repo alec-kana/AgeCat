@@ -374,16 +374,40 @@ def _cryptography_backend() -> tuple[Cipher, Cipher] | None:
     )
 
 
-def _select_backend() -> tuple[str, Cipher, Cipher]:
-    """Pick the fastest available AES implementation."""
+# FIPS-197 appendix C.1, used to check that a compiled backend actually works.
+_SELF_TEST_KEY = bytes(range(16))
+_SELF_TEST_PLAINTEXT = bytes.fromhex("00112233445566778899aabbccddeeff")
+_SELF_TEST_CIPHERTEXT = bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")
 
-    for name, factory in (
+
+def _backend_works(encrypt: Cipher, decrypt: Cipher) -> bool:
+    iv = bytes(BLOCK_SIZE)
+    return (
+        encrypt(_SELF_TEST_KEY, iv, _SELF_TEST_PLAINTEXT) == _SELF_TEST_CIPHERTEXT
+        and decrypt(_SELF_TEST_KEY, iv, _SELF_TEST_CIPHERTEXT) == _SELF_TEST_PLAINTEXT
+    )
+
+
+def _select_backend(
+    factories: tuple[tuple[str, Callable[[], tuple[Cipher, Cipher] | None]], ...] = (
         ("pycryptodome", _pycryptodome_backend),
         ("cryptography", _cryptography_backend),
-    ):
-        backend = factory()
-        if backend is not None:
-            return name, backend[0], backend[1]
+    ),
+) -> tuple[str, Cipher, Cipher]:
+    """Pick the fastest AES implementation that actually works.
+
+    A compiled package can be importable yet broken: a-Shell ships pycryptodome
+    whose native frameworks fail to load with ``OSError``. Any failure while
+    loading or self-testing a backend just moves on to the next one.
+    """
+
+    for name, factory in factories:
+        try:
+            backend = factory()
+            if backend is not None and _backend_works(*backend):
+                return name, backend[0], backend[1]
+        except Exception:
+            continue
     return "python", _python_encrypt, _python_decrypt
 
 

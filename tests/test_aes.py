@@ -50,6 +50,28 @@ class PurePythonAesTests(unittest.TestCase):
         )
 
 
+class BackendSelectionTests(unittest.TestCase):
+    def test_falls_back_when_native_library_fails_to_load(self):
+        # a-Shell's bundled pycryptodome raises OSError for its missing frameworks.
+        def broken():
+            raise OSError("Cannot load native framework")
+
+        name, _, _ = aes._select_backend((("pycryptodome", broken),))
+        self.assertEqual(name, "python")
+
+    def test_skips_backend_that_fails_self_test(self):
+        def wrong(key, iv, data):
+            return bytes(len(data))
+
+        name, _, _ = aes._select_backend((("bogus", lambda: (wrong, wrong)),))
+        self.assertEqual(name, "python")
+
+    def test_uses_working_backend(self):
+        backend = (aes._python_encrypt, aes._python_decrypt)
+        name, _, _ = aes._select_backend((("fast", lambda: backend),))
+        self.assertEqual(name, "fast")
+
+
 class PaddingTests(unittest.TestCase):
     def test_round_trip_for_every_remainder(self):
         key, iv = os.urandom(16), os.urandom(16)
