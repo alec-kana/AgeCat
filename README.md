@@ -177,10 +177,10 @@ agecat search 关键词 [OPTIONS]
 | `-s`, `--source LIST` | 只使用这些播放源，按给定顺序尝试 | 见上方播放源表 |
 | `--base-url URL` | 指定 AGE 站点，不再自动解析当前域名 | 自动 |
 | `-c`, `--concurrency N` | 同时下载的集数 | `3` |
-| `--segment-concurrency N` | 每集同时下载的 HLS 分片数 | `4` |
+| `--segment-concurrency N` | 每集同时下载的 HLS 分片数 | `8` |
 | `--keep-ads` | 保留 m3u8 源中插入的广告片段 | `False` |
 | `--ffmpeg PATH` | 用于封装 MP4 的 ffmpeg；也可设环境变量 `AGECAT_FFMPEG` | `PATH` 中的 `ffmpeg` |
-| `--no-pacing` | 关闭所有请求节奏延迟（最快） | `False` |
+| `--no-pacing` | 关闭所有请求节奏延迟。默认已不加延迟，仅在用 `--min-delay` 等参数加了延迟时有用；遇到 403/429 仍会自动退避重试 | `False` |
 | `--overwrite` | 覆盖已下载的文件 | `False` |
 | `--no-resume` | 不沿用已有的 `.part` 临时文件 | `False` |
 | `--keep-partial` | 保留中断或失败集数的临时文件，下次运行可以接着下载。默认会删除，并顺便清理输出目录中以前遗留的临时文件（本次没用到的动画文件夹只清理 30 分钟以上未写入的）。也可设环境变量 `AGECAT_KEEP_PARTIAL=1` | `False` |

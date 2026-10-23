@@ -18,7 +18,7 @@ DEFAULT_SOURCE_PRIORITY = (
 )
 
 DEFAULT_CONCURRENCY = 3
-DEFAULT_SEGMENT_CONCURRENCY = 4
+DEFAULT_SEGMENT_CONCURRENCY = 8
 DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_READ_TIMEOUT = 30.0
 DEFAULT_RETRIES = 3
@@ -36,12 +36,13 @@ KEEP_PARTIAL_ENV_VAR = "AGECAT_KEEP_PARTIAL"
 # file another run is still recovering is never deleted from under it.
 STALE_PARTIAL_AGE = 30 * 60.0
 
-# Pacing. The host interval is what prevents simultaneous requests; the
-# per-episode delays only break up cadence, so they stay short.
-DEFAULT_MIN_DELAY = 0.5
-DEFAULT_MAX_DELAY = 2.0
-DEFAULT_STAGGER = 2.0
-DEFAULT_HOST_INTERVAL = 0.5
+# Pacing. Off by default: AGE and its stream hosts served whole series with
+# no delays and no 403s, and blocks are still handled by the backoff and
+# circuit breaker below. The flags remain for slowing down if that changes.
+DEFAULT_MIN_DELAY = 0.0
+DEFAULT_MAX_DELAY = 0.0
+DEFAULT_STAGGER = 0.0
+DEFAULT_HOST_INTERVAL = 0.0
 DEFAULT_MAX_BACKOFF = 30.0
 MAX_RETRY_AFTER = 120.0
 
