@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- 默认不再加请求节奏延迟（`--min-delay`、`--max-delay`、`--stagger-start`、`--host-interval` 默认都改为 0），相当于默认 `--no-pacing`。实测连续下载整部 15 集两次均未遇到 403。遇到 403/429 时的自动退避重试和熔断暂停保留不变，需要放慢时仍可手动设置这些参数。
+- 每集同时下载的 HLS 分片数（`--segment-concurrency`）默认从 4 改为 8，同样经过上述实测。同时下载的集数（`-c`）仍为 3。
+
+### Fixed
+
+- 修复多集同时下载完成时 ffmpeg 封装 MP4 失败（`bus error`、`Input/output error`）、只能保留 `.ts` 的问题：a-Shell 的 ffmpeg 在同一进程内运行，同时运行会互相崩溃，现在封装改为逐个进行。
+
 ## 0.4.0 - 2026-10-23
 
 ### Removed

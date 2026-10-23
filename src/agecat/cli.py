@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Disable every pacing delay at once, overriding the four flags below. "
-            "Fastest, but restores the burst pattern that draws 403s."
+            "Pacing is already off by default; this undoes delays set by those flags."
         ),
     )
     pacing_group.add_argument(
