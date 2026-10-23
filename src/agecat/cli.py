@@ -17,10 +17,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import __version__
-from .account import AccountIO, ensure_login, interactive_login
-from .auth import NotLoggedInError, SessionStore, refresh_session
 from .client import AgeClient
-from .collects import fetch_collects
 from .constants import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
@@ -62,9 +59,6 @@ EXIT_FAILURE = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
 SEARCH_COMMAND = "search"
-LOGIN_COMMAND = "login"
-LOGOUT_COMMAND = "logout"
-COLLECTS_COMMAND = "collects"
 # Handled like Ctrl-C so the run stops cleanly instead of dying mid-write.
 TERMINATION_SIGNALS = ("SIGTERM", "SIGHUP")
 # Below this terminal width the search table drops its metadata column.
@@ -105,9 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Commands:\n"
             "  search <keyword>  Search AGE and list matching detail URLs\n"
-            "  login             Log in once; the session is kept for later runs\n"
-            "  logout            Forget the saved session and password\n"
-            "  collects          List your favorites; -d downloads them\n"
             "\n"
             "Exit codes:\n"
             "  0  All downloads completed or were skipped\n"
@@ -424,14 +415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     # Dispatched before the download parser so that plain `agecat <url>` keeps
     # working without requiring a subcommand.
-    subcommands = {
-        SEARCH_COMMAND: search_main,
-        LOGIN_COMMAND: login_main,
-        LOGOUT_COMMAND: logout_main,
-        COLLECTS_COMMAND: collects_main,
-    }
-    if arguments and arguments[0] in subcommands:
-        return subcommands[arguments[0]](arguments[1:])
+    if arguments and arguments[0] == SEARCH_COMMAND:
+        return search_main(arguments[1:])
 
     parser = build_parser()
     args = parser.parse_args(arguments)
@@ -596,28 +581,19 @@ def search_main(argv: Sequence[str]) -> int:
 def render_search_results(results: Sequence[SearchResult], total: int) -> None:
     """Render search matches, keeping the URL column intact for copy/paste."""
 
-    render_listing(results, search_summary(len(results), total))
-
-
-def render_listing(
-    results: Sequence[SearchResult], summary: str, *, numbered: bool = False
-) -> None:
-    """Render anime entries with their detail URLs, adapting to the terminal width."""
-
     # Rich's automatic highlighter recolours numbers and stray words in the
     # summary line, which fights the styling the table already applies.
     console = Console(highlight=False)
     if console.width < SEARCH_TABLE_MIN_WIDTH:
         # Too narrow for a URL column at all: one block per result instead.
-        for number, result in enumerate(results, start=1):
-            prefix = f"{number}. " if numbered else ""
-            line = f"[bold]{prefix}{escape(result.title)}[/bold]"
+        for result in results:
+            line = f"[bold]{escape(result.title)}[/bold]"
             if meta := format_result_meta(result):
                 line += f"  [dim]{escape(meta)}[/dim]"
             console.print(line)
             # soft_wrap keeps the URL one unbroken string, so copying it never picks up newlines.
             console.print(f"  [cyan]{escape(result.url)}[/cyan]", soft_wrap=True)
-        console.print(summary)
+        console.print(search_summary(len(results), total))
         return
 
     # A phone held upright leaves too little room for three columns; the
@@ -628,8 +604,6 @@ def render_listing(
     # value. Narrow terminals then shrink the title and metadata instead of
     # cropping a URL into something that cannot be pasted back.
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", pad_edge=False)
-    if numbered:
-        table.add_column("#", justify="right", style="dim")
     table.add_column("Title", style="bold", overflow="fold")
     if show_meta:
         table.add_column("Status · Premiere", style="dim")
@@ -639,16 +613,14 @@ def render_listing(
         no_wrap=True,
         width=max(len(result.url) for result in results),
     )
-    for number, result in enumerate(results, start=1):
-        cells = [str(number)] if numbered else []
-        cells.append(result.title)
+    for result in results:
         if show_meta:
-            cells.append(format_result_meta(result))
-        cells.append(result.url)
-        table.add_row(*cells)
+            table.add_row(result.title, format_result_meta(result), result.url)
+        else:
+            table.add_row(result.title, result.url)
 
     console.print(table)
-    console.print(summary)
+    console.print(search_summary(len(results), total))
 
 
 def search_summary(shown: int, total: int) -> str:
@@ -658,211 +630,6 @@ def search_summary(shown: int, total: int) -> str:
     if total > shown:
         summary += f" of {total}; use --limit to see more or refine the keyword"
     return summary
-
-
-def build_login_parser() -> argparse.ArgumentParser:
-    """Build the argument parser for the login subcommand."""
-
-    parser = argparse.ArgumentParser(
-        prog="agecat login",
-        description=(
-            "Log in to AGE once. The session is saved and reused by later runs, so you "
-            "only log in again when AGE expires it."
-        ),
-    )
-    password_group = parser.add_mutually_exclusive_group()
-    password_group.add_argument(
-        "--save-password",
-        dest="save_password",
-        action="store_true",
-        default=None,
-        help="Also save the password, so an expired session only needs the captcha.",
-    )
-    password_group.add_argument(
-        "--no-save-password",
-        dest="save_password",
-        action="store_false",
-        help="Do not save the password (the session is still saved).",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Log in again even if the saved session still works.",
-    )
-    add_site_and_verbosity(parser)
-    return parser
-
-
-def build_collects_parser() -> argparse.ArgumentParser:
-    """Build the argument parser for the favorites subcommand."""
-
-    parser = argparse.ArgumentParser(
-        prog="agecat collects",
-        description=(
-            "List your AGE favorites (logging in first if needed). With --download, "
-            "download them; already downloaded episodes are skipped, so rerunning "
-            "fetches only new episodes. Any other option is passed to the download, "
-            "e.g. -o, --source, -e, --plain-progress."
-        ),
-    )
-    parser.add_argument(
-        "-d",
-        "--download",
-        action="store_true",
-        help="Download the listed favorites.",
-    )
-    parser.add_argument(
-        "-p",
-        "--pick",
-        type=str,
-        default=None,
-        metavar="SPEC",
-        help="Only these favorites by list number, e.g. '1,3-5'.",
-    )
-    add_site_and_verbosity(parser)
-    return parser
-
-
-def add_site_and_verbosity(parser: argparse.ArgumentParser) -> None:
-    """Add the --base-url and -v/-q options shared by the account subcommands."""
-
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        default=None,
-        metavar="URL",
-        help="Use this AGE site instead of resolving the current domain via age.tv.",
-    )
-    verbosity_group = parser.add_mutually_exclusive_group()
-    verbosity_group.add_argument(
-        "-v",
-        "--verbose",
-        action="count",
-        default=0,
-        help="Show diagnostic logs. Use -vv for HTTP-level debug details.",
-    )
-    verbosity_group.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Suppress diagnostic logs except errors.",
-    )
-
-
-def account_io() -> AccountIO:
-    """Return the terminal prompts the login flow uses."""
-
-    return AccountIO(interactive=sys.stdin.isatty())
-
-
-def login_main(argv: Sequence[str]) -> int:
-    """Run the login subcommand and return a process exit code."""
-
-    args = build_login_parser().parse_args(argv)
-    configure_logging(verbose=args.verbose, quiet=args.quiet)
-    io = account_io()
-    if not io.interactive:
-        print("Logging in needs a terminal to type the captcha.", file=sys.stderr)
-        return EXIT_USAGE
-
-    store = SessionStore()
-    client = AgeClient()
-    try:
-        site_url = args.base_url.rstrip("/") if args.base_url else resolve_site_url(client)
-        if not args.force:
-            try:
-                ensure_login(client, site_url, store, AccountIO(interactive=False))
-            except NotLoggedInError:
-                pass
-            else:
-                refresh_session(client, store)
-                username = store.load().username or "account"
-                print(f"= already logged in as {username}; use --force to log in again")
-                return EXIT_OK
-        interactive_login(client, site_url, store, io, save_password=args.save_password)
-    except AgeCatError as error:
-        print(f"- {error}", file=sys.stderr)
-        return EXIT_FAILURE
-    finally:
-        client.close()
-    return EXIT_OK
-
-
-def logout_main(argv: Sequence[str]) -> int:
-    """Forget the saved session and credentials."""
-
-    parser = argparse.ArgumentParser(
-        prog="agecat logout", description="Delete the saved AGE session and password."
-    )
-    parser.parse_args(argv)
-    store = SessionStore()
-    if store.clear():
-        print(f"= logged out; removed {store.path}")
-    else:
-        print("= no saved session")
-    return EXIT_OK
-
-
-def collects_main(argv: Sequence[str]) -> int:
-    """Run the favorites subcommand and return a process exit code."""
-
-    args, download_args = build_collects_parser().parse_known_args(argv)
-    configure_logging(verbose=args.verbose, quiet=args.quiet)
-    picks = None
-    if args.pick is not None:
-        try:
-            picks = parse_episode_selector(args.pick)
-        except AgeCatError as error:
-            print(f"argument error: {error}", file=sys.stderr)
-            return EXIT_USAGE
-    if picks is not None and not args.download:
-        print("argument error: --pick only applies with --download", file=sys.stderr)
-        return EXIT_USAGE
-    if download_args and not args.download:
-        print(f"argument error: unrecognized arguments: {' '.join(download_args)}", file=sys.stderr)
-        return EXIT_USAGE
-
-    store = SessionStore()
-    client = AgeClient()
-    try:
-        site_url = args.base_url.rstrip("/") if args.base_url else resolve_site_url(client)
-        ensure_login(client, site_url, store, account_io())
-        favorites = fetch_collects(client, site_url)
-        refresh_session(client, store)
-    except AgeCatError as error:
-        print(f"- {error}", file=sys.stderr)
-        return EXIT_FAILURE
-    finally:
-        client.close()
-
-    if not favorites:
-        print("- No favorites on this account.", file=sys.stderr)
-        return EXIT_FAILURE
-
-    chosen = favorites
-    if picks is not None:
-        chosen = [entry for number, entry in enumerate(favorites, start=1) if number in picks]
-        missing = sorted(number for number in picks if number > len(favorites))
-        if missing:
-            print(
-                f"- no favorite numbered {', '.join(map(str, missing))} "
-                f"(there are {len(favorites)})",
-                file=sys.stderr,
-            )
-        if not chosen:
-            return EXIT_USAGE
-
-    render_listing(
-        chosen if args.download else favorites,
-        f"[green]+[/green] {len(favorites)} favorite(s)",
-        numbered=not args.download,
-    )
-    if not args.download:
-        return EXIT_OK
-
-    # The live site is already known; don't resolve it a second time.
-    site_args = [] if "--base-url" in download_args else ["--base-url", site_url]
-    return main([*download_args, *site_args, *(entry.url for entry in chosen)])
 
 
 def format_result_meta(result: SearchResult) -> str:

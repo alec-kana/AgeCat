@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-23
+
+### Removed
+
+- 移除登录与收藏功能：删除 `agecat login`、`agecat logout`、`agecat collects` 以及验证码显示（`agecat.auth`、`agecat.account`、`agecat.collects`、`agecat.png`、`agecat.terminal_image`）。不再读写 `~/.agecat/session.json`，之前保存的登录状态可手动删除。
 
 ### Fixed
 
