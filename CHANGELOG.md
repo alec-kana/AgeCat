@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-10-23
+
+### Added
+
+- 新增 `agecat login` / `agecat logout`：登录一次后保存登录状态（session cookie），之后的运行直接沿用，不再询问；AGE 让登录过期时才需要重新登录。用户名会记住，可选择保存密码，过期后只需输入验证码。
+- 验证码以彩色字符画直接显示在终端（适配手机宽度），并另存为 `captcha.png`；看不清时回车换一张。验证码由人输入，不做自动识别。
+- 新增 `agecat collects`：列出账号收藏，需要时自动登录；`-d` 下载全部收藏（已下载的集数跳过），`-p 1,3-5` 按编号选择，其他下载参数原样传递。
+- 登录状态保存在 `~/.agecat/session.json`（`AGECAT_HOME` 可改），权限仅本人可读；AGE 换域名后自动套用到新域名。每次成功使用后会更新保存的 cookie，延续登录。
+- 新增纯 Python PNG 解码（`agecat.png`）与终端图片显示（`agecat.terminal_image`），不依赖无法在 a-Shell 安装的 Pillow。
+
 ## 0.2.0 - 2026-10-23
 
 同步 AniCat-v2 0.4.0 之后的功能。

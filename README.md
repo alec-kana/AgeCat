@@ -16,6 +16,7 @@ AgeCat 能把 AGE 动漫的单集或整部动画下载为本地 MP4 文件，支
 - **按动画名称分文件夹**：文件保存为 `<输出目录>/<动画名>/<动画名> 第01集.mp4`。
 - **重复运行很便宜**：已下载的集数只请求一次播放页（用来确定文件名）就跳过，不会去解析播放源。每周追番时重跑同一个详情页几乎没有额外等待。
 - **先搜索再下载**：`agecat search 关键词` 直接列出 AGE 上的匹配结果和详情页链接，不必自己去网站找 URL。
+- **收藏追番，只需登录一次**：`agecat collects -d` 下载你在 AGE 收藏的全部动画，已下载的集数自动跳过。登录状态会保存下来，之后不用再输入密码和验证码。
 - **续传与不残留临时文件**：同一次运行中，网络中断或直链签名过期（403）都会从已下载的位置继续。下载被中断（Ctrl-C、终止信号）或失败时，默认会停止所有下载、关闭文件并删除该集的临时文件，不会留下占用空间的残留；需要下次接着下载时加 `--keep-partial`。
 
 ## 播放源
@@ -109,6 +110,8 @@ python3 -m pip install -e .
 ```bash
 agecat URL [URL ...] [OPTIONS]
 agecat search 关键词 [OPTIONS]
+agecat collects [-d] [OPTIONS]
+agecat login | agecat logout
 ```
 
 ### 示例
@@ -199,6 +202,45 @@ agecat search 关键词 [OPTIONS]
 | `-v` / `-q` | 显示诊断日志 / 只显示错误 | - |
 
 结果超过 `--limit` 时会提示总数（例如 `+ 48 result(s) of 1392`），可以加大 `--limit` 或换更精确的关键词。没有结果时 exit code 为 `1`。
+
+### 登录与收藏
+
+**只需登录一次。** 第一次使用 `agecat collects`（或 `agecat login`）时会依次询问用户名、密码和验证码，验证码图片会直接画在终端里：
+
+```text
+$ agecat collects
+AGE 登录已过期或尚未登录，需要登录一次。
+? AGE 用户名：alec
+? 密码：
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ← 彩色验证码
+验证码图片也已保存到 /…/.agecat/captcha.png
+? 验证码（看不清直接回车换一张）：4809
+? 保存密码？之后登录过期时只需输入验证码 [y/N]：y
++ 已登录 alec，登录状态已保存到 /…/.agecat/session.json
+ #  Title      Status · Premiere   URL
+ 1  欺诈游戏   第26集(完结)         https://www.agedm.io/detail/20260096
+ …
+```
+
+之后的每次运行都直接沿用保存的登录状态，**不再询问任何东西**，直到 AGE 让登录过期：
+
+- 选了保存密码：过期后只需输入 4 位验证码；
+- 没有保存密码：过期后再输入一次密码和验证码（用户名会记住）。
+
+验证码必须由人来输入，AgeCat 不会自动识别。验证码看不清时直接回车换一张；终端显示不了彩色图片时，可以在「文件」App 或电脑上打开保存的 `captcha.png`。
+
+| 命令 | 说明 |
+|---|---|
+| `agecat collects` | 列出收藏（带编号），需要时自动登录 |
+| `agecat collects -d` | 下载全部收藏。已下载的集数会跳过，所以每周运行一次就能补上新集 |
+| `agecat collects -d -p 1,3-5` | 只下载编号 1、3、4、5 的收藏 |
+| `agecat collects -d -o ~/Documents/age --plain-progress` | 其他下载参数（`-o`、`--source`、`-e`、`--keep-partial` 等）原样传给下载 |
+| `agecat login` | 主动登录；已登录时直接提示。`--force` 强制重新登录，`--save-password` / `--no-save-password` 跳过保存密码的询问 |
+| `agecat logout` | 删除保存的登录状态和密码 |
+
+**保存在哪里、安全吗？** 登录状态保存在 `~/.agecat/session.json`（可用环境变量 `AGECAT_HOME` 改位置）。在 a-Shell 上它位于 App 的主目录，不在 `~/Documents` 里，所以不会出现在「文件」App 中；在电脑上文件权限为仅本人可读。注意：a-Shell 中的 Python 无法使用 iOS 钥匙串，**选择保存密码时，密码以明文存在这个文件里**；不想保存就选 `N`，只保存登录状态。不再使用时运行 `agecat logout` 清除。
+
+AGE 换域名后保存的登录状态会自动套用到新域名；如果新域名下登录失效，会提示重新登录。
 
 ### 中断下载与存储空间
 
