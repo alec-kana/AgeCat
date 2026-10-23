@@ -1,3 +1,4 @@
+import os
 import unittest
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -5,8 +6,15 @@ from tempfile import TemporaryDirectory
 
 import requests
 
-from agecat.downloader import download_episode, sanitize_filename
-from agecat.errors import AccessDeniedError, DownloadError, FetchError
+from agecat.downloader import (
+    discard_partial,
+    download_episode,
+    partial_folders,
+    partial_paths,
+    sanitize_filename,
+    stale_partials,
+)
+from agecat.errors import AccessDeniedError, DownloadCancelled, DownloadError, FetchError
 from agecat.models import Episode
 
 
@@ -405,6 +413,105 @@ class DownloaderTests(unittest.TestCase):
                 download_episode(client, episode, Path(directory), chunk_size=2)
 
             self.assertEqual((Path(directory) / "Demo.mp4.part").read_bytes(), b"abc")
+
+
+def demo_episode() -> Episode:
+    return Episode(
+        page_url="https://www.agedm.io/play/1/1/1",
+        title="Demo",
+        stream_url="https://cdn.example/demo.mp4",
+    )
+
+
+class StopAndPartialTests(unittest.TestCase):
+    def test_stop_request_ends_the_stream_between_chunks_without_retrying(self):
+        response = FakeResponse(b"abcdef", headers={"content-length": "6"})
+        client = FakeClient(response)
+        checks = iter([False, False, True])
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaises(DownloadCancelled):
+                download_episode(
+                    client,
+                    demo_episode(),
+                    Path(directory),
+                    chunk_size=2,
+                    stream_retries=5,
+                    should_stop=lambda: next(checks),
+                )
+
+            # Only the chunk written before the stop request landed.
+            self.assertEqual((Path(directory) / "Demo.mp4.part").read_bytes(), b"ab")
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(response.closed)
+
+    def test_stop_request_before_the_stream_opens_makes_no_request(self):
+        client = FakeClient(FakeResponse(b"unused"))
+
+        with TemporaryDirectory() as directory, self.assertRaises(DownloadCancelled):
+            download_episode(client, demo_episode(), Path(directory), should_stop=lambda: True)
+
+        self.assertEqual(client.calls, [])
+
+    def test_partial_paths_cover_mp4_part_and_hls_work_dir(self):
+        root = Path("out")
+
+        self.assertEqual(
+            partial_paths(root, "Demo 第01集"),
+            [root / "Demo 第01集.mp4.part", root / "Demo 第01集.hls.part"],
+        )
+
+    def test_discard_partial_frees_files_and_hls_dirs_once(self):
+        with TemporaryDirectory() as directory:
+            part, work_dir = partial_paths(Path(directory), "Demo")
+            part.write_bytes(b"abcd")
+            work_dir.mkdir()
+            (work_dir / "00000.ts").write_bytes(b"123")
+            (work_dir / "source.txt").write_bytes(b"45")
+
+            self.assertEqual(discard_partial(part), 4)
+            self.assertEqual(discard_partial(work_dir), 5)
+            self.assertFalse(part.exists())
+            self.assertFalse(work_dir.exists())
+            self.assertIsNone(discard_partial(part))
+
+    def test_stale_partials_lists_part_files_and_hls_dirs_only(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "A.mp4.part").write_bytes(b"a")
+            (root / "B.hls.part").mkdir()
+            (root / "C.mp4").write_bytes(b"c")
+            (root / "notes.part").write_bytes(b"d")
+            (root / "Show").mkdir()
+
+            self.assertEqual(stale_partials(root), [root / "A.mp4.part", root / "B.hls.part"])
+            self.assertEqual(stale_partials(root / "missing"), [])
+
+    def test_stale_partials_can_skip_recently_written_ones(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "Old.mp4.part"
+            old.write_bytes(b"a")
+            os.utime(old, (1000, 1000))
+            old_dir = root / "Old.hls.part"
+            old_dir.mkdir()
+            os.utime(old_dir, (1000, 1000))
+            (root / "Live.mp4.part").write_bytes(b"b")
+            (root / "Live.hls.part").mkdir()
+
+            self.assertEqual(stale_partials(root, modified_before=2000), [old_dir, old])
+
+    def test_partial_folders_lists_anime_subfolders_but_not_hls_work_dirs(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "B Show").mkdir()
+            (root / "A Show").mkdir()
+            (root / "Loose.hls.part").mkdir()
+            (root / "Loose.mp4").write_bytes(b"x")
+
+            self.assertEqual(partial_folders(root), [root, root / "A Show", root / "B Show"])
+            self.assertEqual(partial_folders(root / "missing"), [])
 
 
 if __name__ == "__main__":

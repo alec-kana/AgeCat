@@ -8,7 +8,7 @@ from unittest import mock
 import requests
 
 from agecat.aes import cbc_encrypt
-from agecat.errors import AccessDeniedError, DownloadError, ParseError
+from agecat.errors import AccessDeniedError, DownloadCancelled, DownloadError, ParseError
 from agecat.hls import (
     Segment,
     Variant,
@@ -300,6 +300,30 @@ class DownloadTests(unittest.TestCase):
             work_dir = hls_work_dir(output_dir, "Demo 第01集")
             self.assertEqual(segment_path(work_dir, 0).read_bytes(), b"<0>")
             self.assertFalse(segment_path(work_dir, 1).exists())
+
+    def test_stop_request_drops_queued_segments_and_keeps_finished_ones(self):
+        client = FakeHlsClient(plain_files(4))
+        checks = iter([False, False, False, True, True, True, True])
+
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with self.assertRaises(DownloadCancelled):
+                download_hls_episode(
+                    client,
+                    episode(),
+                    output_dir,
+                    segment_concurrency=1,
+                    should_stop=lambda: next(checks, True),
+                )
+
+            work_dir = hls_work_dir(output_dir, "Demo 第01集")
+            # Playlist check, then segments 0 and 1; the stop request lands before segment 2.
+            self.assertTrue(segment_path(work_dir, 1).exists())
+            self.assertFalse(segment_path(work_dir, 2).exists())
+            self.assertFalse((output_dir / "Demo 第01集.ts").exists())
+
+        fetched = [url for url, _page, _paced in client.requests if url.endswith(".ts")]
+        self.assertEqual(len(fetched), 2)
 
     def test_existing_output_is_skipped(self):
         client = FakeHlsClient({})

@@ -54,6 +54,10 @@ class DownloadError(AgeCatError):
     """Download/write failure."""
 
 
+class DownloadCancelled(AgeCatError):
+    """The run was interrupted, so this episode stopped before it finished."""
+
+
 def is_bot_mitigation(headers: Mapping[str, str]) -> bool:
     """Classify a denial as edge bot-mitigation rather than expired credentials."""
 

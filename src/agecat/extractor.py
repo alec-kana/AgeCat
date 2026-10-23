@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup, FeatureNotFound, Tag
 
 from .constants import DEFAULT_SOURCE_PRIORITY
-from .errors import AgeCatError, ParseError
+from .errors import AgeCatError, DownloadCancelled, ParseError
 from .models import Episode
 from .player import (
     PlayerStream,
@@ -415,6 +415,8 @@ class AgeExtractor:
             try:
                 player_url, stream = self._resolve_candidate(candidate)
                 self._probe(stream, player_url)
+            except DownloadCancelled:
+                raise
             except (AgeCatError, requests.RequestException) as error:
                 LOGGER.info("Source %s failed for %s: %s", candidate.label, page.title, error)
                 failures.append(f"{candidate.label}: {error}")

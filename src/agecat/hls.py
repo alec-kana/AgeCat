@@ -27,7 +27,13 @@ import requests
 
 from .aes import BLOCK_SIZE, cbc_decrypt
 from .constants import DEFAULT_SEGMENT_CONCURRENCY, FFMPEG_ENV_VAR
-from .downloader import output_paths, sanitize_filename, skipped_result
+from .downloader import (
+    StopCheck,
+    output_paths,
+    raise_if_stopped,
+    sanitize_filename,
+    skipped_result,
+)
 from .errors import DownloadError, ParseError
 from .models import DownloadProgressEvent, DownloadResult, Episode
 
@@ -324,8 +330,14 @@ def download_hls_episode(
     segment_concurrency: int = DEFAULT_SEGMENT_CONCURRENCY,
     ffmpeg: str | None = None,
     filter_ads: bool = True,
+    should_stop: StopCheck | None = None,
 ) -> DownloadResult:
-    """Download one HLS episode with segment-level resume, then remux it to MP4."""
+    """Download one HLS episode with segment-level resume, then remux it to MP4.
+
+    ``should_stop`` is polled before every segment; once it returns True,
+    queued segments are dropped, in-flight ones finish, and
+    :class:`DownloadCancelled` is raised with the work directory intact.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     mp4_path, ts_path = output_paths(output_dir, episode.title)
@@ -339,6 +351,7 @@ def download_hls_episode(
     if (overwrite or not resume) and work_dir.exists():
         shutil.rmtree(work_dir)
 
+    raise_if_stopped(should_stop, episode.title)
     playlist = fetch_media_playlist(client, episode)
     segments = filter_ad_segments(playlist.segments) if filter_ads else playlist.segments
     prepare_work_dir(work_dir, episode, len(segments))
@@ -372,24 +385,26 @@ def download_hls_episode(
     def fetch(index: int, segment: Segment) -> int:
         """Download, decrypt, and store one segment; return its size."""
 
+        raise_if_stopped(should_stop, episode.title)
         data = fetch_segment_bytes(
             client, segment.uri, segment.key, segment.sequence, keys, episode.player_url
         )
         write_atomic(segment_path(work_dir, index), data)
         return len(data)
 
-    with ThreadPoolExecutor(max_workers=max(1, segment_concurrency)) as executor:
+    executor = ThreadPoolExecutor(max_workers=max(1, segment_concurrency))
+    try:
         futures = [executor.submit(fetch, index, segment) for index, segment in pending]
-        try:
-            for future in as_completed(futures):
-                size = future.result()
-                done, total = counters.add(size)
-                _emit(progress, episode, "advanced", size, done, total)
-        except BaseException:
-            for future in futures:
-                future.cancel()
-            raise
+        for future in as_completed(futures):
+            size = future.result()
+            done, total = counters.add(size)
+            _emit(progress, episode, "advanced", size, done, total)
+    finally:
+        # Drop queued segments on any failure; wait only for the ones in flight,
+        # so no thread keeps writing into the work dir after this returns.
+        executor.shutdown(wait=True, cancel_futures=True)
 
+    raise_if_stopped(should_stop, episode.title)
     joined = join_segments(work_dir, len(segments), has_init=playlist.init_uri is not None)
     final_path = finalize(joined, mp4_path, ts_path, ffmpeg=ffmpeg or find_ffmpeg())
     shutil.rmtree(work_dir, ignore_errors=True)

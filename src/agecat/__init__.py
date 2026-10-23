@@ -4,9 +4,17 @@ import logging
 from importlib.metadata import PackageNotFoundError, version
 
 from .client import AgeClient
-from .errors import AccessDeniedError, AgeCatError, DownloadError, FetchError, ParseError
+from .errors import (
+    AccessDeniedError,
+    AgeCatError,
+    DownloadCancelled,
+    DownloadError,
+    FetchError,
+    ParseError,
+)
 from .models import DownloadProgressEvent, DownloadResult, Episode, EpisodeJob, JobReport
 from .options import DownloadOptions
+from .search import SearchResult
 from .service import AgeCatService
 
 __all__ = [
@@ -14,6 +22,7 @@ __all__ = [
     "AgeCatError",
     "AgeCatService",
     "AgeClient",
+    "DownloadCancelled",
     "DownloadError",
     "DownloadOptions",
     "DownloadProgressEvent",
@@ -23,6 +32,7 @@ __all__ = [
     "FetchError",
     "JobReport",
     "ParseError",
+    "SearchResult",
     "__version__",
 ]
 

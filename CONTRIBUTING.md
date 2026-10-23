@@ -4,9 +4,10 @@
 
 ```txt
 src/agecat/
-├── cli.py            # 命令行参数、输出、exit code
-├── service.py        # URL 展开、域名改写、并发下载协调、403 恢复
+├── cli.py            # 命令行参数、输出、exit code、search 子命令、中断处理
+├── service.py        # URL 展开、域名改写、并发下载协调、403 恢复、中断与临时文件清理
 ├── site.py           # 通过 age.tv 等跳转解析当前域名
+├── search.py         # AGE 站内搜索结果解析与翻页
 ├── client.py         # HTTP session、超时、重试、节奏控制、请求身份头
 ├── extractor.py      # 详情页 / 播放页解析、播放源排序与切换
 ├── player.py         # 第三方解析播放器（/vip/ 解密、/m3u8/）

@@ -4,11 +4,14 @@ import unittest
 from agecat.client import AgeClient
 from agecat.extractor import AgeExtractor
 from agecat.hls import fetch_media_playlist
+from agecat.search import search_anime
 from agecat.site import resolve_site_url
-from agecat.urls import rebase_url
+from agecat.urls import anime_id_from_url, rebase_url
 
 RUN_INTEGRATION = os.environ.get("AGECAT_RUN_INTEGRATION") == "1"
 SMOKE_URL = os.environ.get("AGECAT_SMOKE_URL", "https://www.agedm.io/play/20260096/1/1")
+SMOKE_DETAIL_URL = os.environ.get("AGECAT_SMOKE_DETAIL_URL", "https://www.agedm.io/detail/20260096")
+SMOKE_SEARCH_KEYWORD = os.environ.get("AGECAT_SMOKE_SEARCH_KEYWORD", "欺诈游戏")
 HLS_SOURCES = os.environ.get("AGECAT_SMOKE_HLS_SOURCES", "wjm3u8,hnm3u8,ffm3u8").split(",")
 
 
@@ -36,6 +39,24 @@ class AgeSmokeTests(unittest.TestCase):
             self.assertEqual(len(body), 2)
         finally:
             response.close()
+
+    def test_detail_page_lists_named_numbered_episodes(self):
+        season = AgeExtractor(self.client).season_episode_urls(
+            rebase_url(SMOKE_DETAIL_URL, self.url)
+        )
+
+        self.assertTrue(season.anime_name)
+        self.assertGreater(len(season.episode_urls), 1)
+        self.assertEqual(season.episode_numbers[:2], [1, 2])
+
+    def test_search_finds_the_smoke_anime(self):
+        site = rebase_url("/", self.url).rstrip("/")
+        outcome = search_anime(self.client, site, SMOKE_SEARCH_KEYWORD)
+
+        self.assertGreater(outcome.total, 0)
+        self.assertIn(
+            anime_id_from_url(SMOKE_DETAIL_URL), [result.anime_id for result in outcome.results]
+        )
 
     def test_some_hls_mirror_serves_a_media_playlist(self):
         episode = AgeExtractor(self.client, source_priority=HLS_SOURCES).episode(self.url)

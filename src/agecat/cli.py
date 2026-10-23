@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
+from typing import Any
+
+from rich import box
+from rich.console import Console
+from rich.markup import escape
+from rich.table import Table
 
 from . import __version__
+from .client import AgeClient
 from .constants import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CIRCUIT_BREAKER_COOLDOWN,
@@ -26,6 +36,7 @@ from .constants import (
     DEFAULT_SOURCE_PRIORITY,
     DEFAULT_STAGGER,
     FFMPEG_ENV_VAR,
+    KEEP_PARTIAL_ENV_VAR,
     PLAIN_PROGRESS_ENV_VAR,
 )
 from .errors import AgeCatError
@@ -38,12 +49,22 @@ from .progress import (
     rich_download_progress,
     supports_rich_live,
 )
+from .search import DEFAULT_SEARCH_LIMIT, SearchResult, search_anime
 from .service import AgeCatService
+from .site import resolve_site_url
 from .urls import parse_episode_selector, split_urls
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_USAGE = 2
+EXIT_INTERRUPTED = 130
+SEARCH_COMMAND = "search"
+# Handled like Ctrl-C so the run stops cleanly instead of dying mid-write.
+TERMINATION_SIGNALS = ("SIGTERM", "SIGHUP")
+# Below this terminal width the search table drops its metadata column.
+SEARCH_META_MIN_WIDTH = 80
+# Below this width there is no room for a URL column: results print as blocks.
+SEARCH_TABLE_MIN_WIDTH = 56
 
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -76,10 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Download AGE (agedm) episodes from detail or play URLs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "Commands:\n"
+            "  search <keyword>  Search AGE and list matching detail URLs\n"
+            "\n"
             "Exit codes:\n"
             "  0  All downloads completed or were skipped\n"
-            "  1  At least one URL failed or no episode was found\n"
-            "  2  Invalid CLI usage or options"
+            "  1  At least one URL failed, no episode was found, or nothing matched\n"
+            "  2  Invalid CLI usage or options\n"
+            "  130  Interrupted (Ctrl-C, SIGTERM or SIGHUP); unfinished downloads were stopped"
         ),
     )
     parser.add_argument(
@@ -287,6 +312,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace existing completed files.",
     )
     parser.add_argument(
+        "--keep-partial",
+        action="store_true",
+        default=env_flag(KEEP_PARTIAL_ENV_VAR),
+        help=(
+            "Keep partial downloads (.mp4.part files, .hls.part segment folders) of "
+            "interrupted or failed episodes so a later run can resume them. By default "
+            "they are deleted, along with leftovers in the output folder (in anime "
+            "folders this run does not use, only ones untouched for 30 minutes). "
+            f"Defaults to on if the {KEEP_PARTIAL_ENV_VAR} environment variable is set "
+            "to a truthy value."
+        ),
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable progress bar.",
@@ -326,12 +364,62 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_search_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the search subcommand."""
+
+    parser = argparse.ArgumentParser(
+        prog="agecat search",
+        description="Search AGE and print matching detail URLs.",
+    )
+    parser.add_argument(
+        "keyword",
+        nargs="?",
+        help="Anime title keyword, searched by the AGE site itself (Simplified Chinese).",
+    )
+    parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        default=DEFAULT_SEARCH_LIMIT,
+        metavar="N",
+        help=f"Show at most N results. Default: {DEFAULT_SEARCH_LIMIT}",
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Search this AGE site instead of resolving the current domain via age.tv.",
+    )
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Show diagnostic logs. Use -vv for HTTP-level debug details.",
+    )
+    verbosity_group.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress diagnostic logs except errors.",
+    )
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the AgeCat CLI and return a process exit code."""
 
     ensure_utf8_output()
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # Dispatched before the download parser so that plain `agecat <url>` keeps
+    # working without requiring a subcommand.
+    if arguments and arguments[0] == SEARCH_COMMAND:
+        return search_main(arguments[1:])
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     configure_logging(verbose=args.verbose, quiet=args.quiet)
     try:
         options = options_from_args(args)
@@ -347,21 +435,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"argument error: {error}", file=sys.stderr)
             return EXIT_USAGE
 
-    input_urls = split_urls(args.urls)
-    if not input_urls:
-        if not sys.stdin.isatty():
-            print("No URL provided.", file=sys.stderr)
-            return EXIT_USAGE
-        try:
-            input_urls = split_urls([input("? AGE 链接：")])
-        except EOFError:
-            print("No URL provided.", file=sys.stderr)
-            return EXIT_USAGE
+    input_urls = split_urls(args.urls) or split_urls([prompt_for("? AGE 链接：")])
     if not input_urls:
         print("No URL provided.", file=sys.stderr)
         return EXIT_USAGE
 
     service = AgeCatService(options)
+
+    try:
+        with termination_as_interrupt():
+            return download_and_report(service, options, input_urls, episodes)
+    except KeyboardInterrupt:
+        # download_many has already stopped every worker and closed its files.
+        print("- interrupted; unfinished downloads were stopped.", file=sys.stderr)
+        print_removed_partials(service)
+        return EXIT_INTERRUPTED
+
+
+def download_and_report(
+    service: AgeCatService,
+    options: DownloadOptions,
+    input_urls: list[str],
+    episodes: frozenset[int] | None,
+) -> int:
+    """Collect episodes, download them, and print the per-episode summary."""
 
     try:
         episode_jobs = service.collect_episode_urls(input_urls, episodes=episodes)
@@ -395,7 +492,151 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"+ done in {elapsed:.2f}s: "
         f"{len(downloaded)} downloaded, {len(skipped)} skipped, {len(failed)} failed"
     )
+    print_removed_partials(service)
     return EXIT_FAILURE if failed else EXIT_OK
+
+
+def print_removed_partials(service: AgeCatService) -> None:
+    """Report how much storage the run's partial-download cleanup released."""
+
+    removed = service.removed_partials
+    if not removed:
+        return
+    freed = sum(size for _path, size in removed)
+    print(f"= removed {len(removed)} partial download(s), freeing {format_size(freed)}")
+
+
+@contextmanager
+def termination_as_interrupt() -> Iterator[None]:
+    """Raise KeyboardInterrupt on SIGTERM/SIGHUP so they get the Ctrl-C cleanup.
+
+    Their default action kills the process mid-write, skipping it entirely.
+    """
+
+    def interrupt(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    previous: dict[int, Any] = {}
+    for name in TERMINATION_SIGNALS:
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            previous[signum] = signal.signal(signum, interrupt)
+        except (OSError, ValueError):
+            # Not the main thread, or the host does not allow the signal.
+            continue
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def prompt_for(label: str) -> str:
+    """Ask for one missing argument, returning empty when input is unavailable."""
+
+    # Piped or redirected input must fail with usage instead of blocking.
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        return input(label).strip()
+    except EOFError:
+        return ""
+
+
+def search_main(argv: Sequence[str]) -> int:
+    """Run the search subcommand and return a process exit code."""
+
+    parser = build_search_parser()
+    args = parser.parse_args(argv)
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
+    if args.limit < 1:
+        print("argument error: --limit must be at least 1", file=sys.stderr)
+        return EXIT_USAGE
+
+    keyword = (args.keyword or "").strip() or prompt_for("? 搜索关键词：")
+    if not keyword:
+        print("No keyword provided.", file=sys.stderr)
+        return EXIT_USAGE
+
+    client = AgeClient()
+    try:
+        site_url = args.base_url.rstrip("/") if args.base_url else resolve_site_url(client)
+        outcome = search_anime(client, site_url, keyword, limit=args.limit)
+    except AgeCatError as error:
+        print(f"- {error}", file=sys.stderr)
+        return EXIT_FAILURE
+    finally:
+        client.close()
+
+    if not outcome.results:
+        print(f"- No search result for {keyword!r}.", file=sys.stderr)
+        return EXIT_FAILURE
+
+    render_search_results(outcome.results, outcome.total)
+    return EXIT_OK
+
+
+def render_search_results(results: Sequence[SearchResult], total: int) -> None:
+    """Render search matches, keeping the URL column intact for copy/paste."""
+
+    # Rich's automatic highlighter recolours numbers and stray words in the
+    # summary line, which fights the styling the table already applies.
+    console = Console(highlight=False)
+    if console.width < SEARCH_TABLE_MIN_WIDTH:
+        # Too narrow for a URL column at all: one block per result instead.
+        for result in results:
+            line = f"[bold]{escape(result.title)}[/bold]"
+            if meta := format_result_meta(result):
+                line += f"  [dim]{escape(meta)}[/dim]"
+            console.print(line)
+            # soft_wrap keeps the URL one unbroken string, so copying it never picks up newlines.
+            console.print(f"  [cyan]{escape(result.url)}[/cyan]", soft_wrap=True)
+        console.print(search_summary(len(results), total))
+        return
+
+    # A phone held upright leaves too little room for three columns; the
+    # metadata column goes first so titles stay readable next to the URL.
+    show_meta = console.width >= SEARCH_META_MIN_WIDTH
+
+    # The URL is the payload of this command, so pin its column to the widest
+    # value. Narrow terminals then shrink the title and metadata instead of
+    # cropping a URL into something that cannot be pasted back.
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", pad_edge=False)
+    table.add_column("Title", style="bold", overflow="fold")
+    if show_meta:
+        table.add_column("Status · Premiere", style="dim")
+    table.add_column(
+        "URL",
+        style="cyan",
+        no_wrap=True,
+        width=max(len(result.url) for result in results),
+    )
+    for result in results:
+        if show_meta:
+            table.add_row(result.title, format_result_meta(result), result.url)
+        else:
+            table.add_row(result.title, result.url)
+
+    console.print(table)
+    console.print(search_summary(len(results), total))
+
+
+def search_summary(shown: int, total: int) -> str:
+    """Return the result-count line, pointing at --limit when matches were cut off."""
+
+    summary = f"[green]+[/green] {shown} result(s)"
+    if total > shown:
+        summary += f" of {total}; use --limit to see more or refine the keyword"
+    return summary
+
+
+def format_result_meta(result: SearchResult) -> str:
+    """Join the episode status, type, and premiere date of one result."""
+
+    parts = (result.status, result.kind, result.premiere)
+    return " · ".join(part for part in parts if part)
 
 
 def options_from_args(args: argparse.Namespace) -> DownloadOptions:
@@ -410,6 +651,7 @@ def options_from_args(args: argparse.Namespace) -> DownloadOptions:
         chunk_size=args.chunk_size,
         resume=not args.no_resume,
         overwrite=args.overwrite,
+        keep_partial=args.keep_partial,
         progress=not args.no_progress,
         plain_progress=args.plain_progress,
         min_delay=0.0 if args.no_pacing else args.min_delay,

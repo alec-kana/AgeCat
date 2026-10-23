@@ -3,21 +3,25 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from threading import Lock, local
+from threading import Event, Lock, local
 from typing import Protocol
 
 from .client import AgeClient
-from .constants import DEFAULT_BLOCKED_BACKOFF, DEFAULT_MAX_BACKOFF
+from .constants import DEFAULT_BLOCKED_BACKOFF, DEFAULT_MAX_BACKOFF, STALE_PARTIAL_AGE
 from .downloader import (
     VideoSource,
+    discard_partial,
     download_episode,
     existing_download,
+    partial_folders,
+    partial_paths,
     sanitize_filename,
     skipped_result,
+    stale_partials,
 )
-from .errors import AccessDeniedError, AgeCatError
+from .errors import AccessDeniedError, AgeCatError, DownloadCancelled
 from .extractor import AgeExtractor, EpisodeSource
 from .headers import host
 from .hls import SegmentSource, download_hls_episode
@@ -38,6 +42,8 @@ JobDone = Callable[["JobReport"], None]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
 LOGGER = logging.getLogger(__name__)
+# How often the coordinating thread wakes up to notice Ctrl-C while workers run.
+WAIT_POLL_INTERVAL = 0.5
 
 BLOCKED_HINT = (
     "blocked by anti-bot protection; try a lower --concurrency, "
@@ -66,27 +72,44 @@ class AgeCatService:
         options: DownloadOptions,
         *,
         client_factory: Callable[[], AgeCatClient] | None = None,
-        sleeper: Sleeper = time.sleep,
+        sleeper: Sleeper | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
         self.options = options
         self.client_factory = client_factory or self._default_client
-        self.sleeper = sleeper
+        self._cancelled = Event()
+        # Every pause (pacing, rate limiting, backoff, circuit breaker) goes
+        # through this, so cancelling wakes a sleeping worker immediately.
+        self.sleeper = sleeper or self._interruptible_sleep
         self.clock = clock
+        self._partials_lock = Lock()
+        self._touched_dirs: set[Path] = set()
+        self.removed_partials: list[tuple[Path, int]] = []
         # Shared across worker threads, not per-worker.
         self.rate_limiter = RateLimiter(
             options.host_interval,
             jitter=options.host_interval,
-            sleeper=sleeper,
+            sleeper=self.sleeper,
             clock=clock,
         )
         self.circuit_breaker = CircuitBreaker(
             options.circuit_breaker_threshold,
             options.circuit_breaker_cooldown,
-            sleeper=sleeper,
+            sleeper=self.sleeper,
             clock=clock,
         )
         self.site_url: str | None = options.base_url.rstrip("/") if options.base_url else None
+
+    @property
+    def cancelled(self) -> bool:
+        """Return whether the current download run has been cancelled."""
+
+        return self._cancelled.is_set()
+
+    def cancel(self) -> None:
+        """Stop the current run: queued episodes never start, running ones stop soon."""
+
+        self._cancelled.set()
 
     def collect_episode_urls(
         self,
@@ -150,8 +173,18 @@ class AgeCatService:
         on_progress: DownloadProgress | None = None,
         on_done: JobDone | None = None,
     ) -> list[JobReport]:
-        """Download multiple episode jobs concurrently and return job reports."""
+        """Download multiple episode jobs concurrently and return job reports.
 
+        If the caller is interrupted (Ctrl-C, a termination signal raised as
+        ``KeyboardInterrupt``, or a failing callback), the run is cancelled
+        and this waits for every worker to close its stream and partial
+        files before re-raising, so no thread keeps writing in the background.
+        """
+
+        self._cancelled.clear()
+        with self._partials_lock:
+            self._touched_dirs.clear()
+            self.removed_partials.clear()
         LOGGER.info(
             "Downloading %d episode(s) with %d worker(s)",
             len(episode_jobs),
@@ -176,7 +209,10 @@ class AgeCatService:
         def download_with_worker_client(job: EpisodeJob) -> JobReport:
             """Download one job using the session owned by the current worker thread."""
 
-            self._pace_worker(worker_state)
+            try:
+                self._pace_worker(worker_state)
+            except DownloadCancelled as error:
+                return JobReport(url=job.url, error=str(error))
             return self._download_one_with_client(
                 worker_client(),
                 job.url,
@@ -184,21 +220,40 @@ class AgeCatService:
                 on_progress=on_progress,
             )
 
+        # Managed by hand: the context manager's exit waits for every queued
+        # job, so an interrupted batch would keep downloading to the end.
+        executor = ThreadPoolExecutor(max_workers=self.options.worker_count)
         try:
-            with ThreadPoolExecutor(max_workers=self.options.worker_count) as executor:
-                # Each worker owns one reusable HTTP session across its assigned jobs.
-                futures = {
-                    executor.submit(download_with_worker_client, job): job for job in episode_jobs
-                }
+            # Each worker owns one reusable HTTP session across its assigned jobs.
+            futures = {
+                executor.submit(download_with_worker_client, job): job for job in episode_jobs
+            }
 
-                for future in as_completed(futures):
+            pending = set(futures)
+            while pending:
+                # Wake up regularly instead of blocking until a job finishes: a
+                # plain lock wait cannot be interrupted on Windows, so Ctrl-C
+                # would otherwise only land once the current episode completed.
+                done, pending = wait(
+                    pending, timeout=WAIT_POLL_INTERVAL, return_when=FIRST_COMPLETED
+                )
+                for future in done:
                     report = future.result()
                     reports.append(report)
                     if on_done:
                         on_done(report)
+        except BaseException:
+            LOGGER.warning("Interrupted; stopping active downloads")
+            self.cancel()
+            shutdown_until_idle(executor)
+            raise
+        else:
+            executor.shutdown(wait=True)
         finally:
             for client in worker_clients:
                 close_client(client)
+            if not self.options.keep_partial:
+                self._sweep_partials()
 
         return reports
 
@@ -244,6 +299,40 @@ class AgeCatService:
         anime_name: str | None = None,
         on_progress: DownloadProgress | None = None,
     ) -> JobReport:
+        """Resolve and download one episode URL, removing its partials if it does not finish."""
+
+        # Filled once the episode's output paths are known.
+        partials: set[Path] = set()
+        report: JobReport | None = None
+        try:
+            report = self._download_with_recovery(
+                client,
+                url,
+                anime_name=anime_name,
+                on_progress=on_progress,
+                partials=partials,
+            )
+            return report
+        except DownloadCancelled as error:
+            LOGGER.info("Episode cancelled: %s", url)
+            report = JobReport(url=url, error=str(error))
+            return report
+        finally:
+            # Also runs when an unexpected exception escapes, so a crash
+            # never strands a half-written file.
+            if not self.options.keep_partial and (report is None or report.error):
+                for part in partials:
+                    self._remove_partial(part)
+
+    def _download_with_recovery(
+        self,
+        client: AgeCatClient,
+        url: str,
+        *,
+        anime_name: str | None,
+        on_progress: DownloadProgress | None,
+        partials: set[Path],
+    ) -> JobReport:
         """Resolve and download one episode URL, re-resolving on denied access.
 
         Each attempt mints fresh credentials and re-enters the download, which
@@ -257,8 +346,8 @@ class AgeCatService:
         attempts = self.options.resolve_attempts
 
         for attempt in range(attempts):
-            self.circuit_breaker.wait(target_host)
             try:
+                self.circuit_breaker.wait(target_host)
                 return self._resolve_and_download(
                     client,
                     extractor,
@@ -266,6 +355,7 @@ class AgeCatService:
                     anime_name=anime_name,
                     on_progress=on_progress,
                     overwrite=overwrite,
+                    partials=partials,
                 )
             except AccessDeniedError as error:
                 self.circuit_breaker.record_block(target_host)
@@ -284,6 +374,8 @@ class AgeCatService:
                     attempts,
                 )
                 self.sleeper(delay)
+            except DownloadCancelled:
+                raise
             except AgeCatError as error:
                 LOGGER.warning("Episode failed with recoverable error: %s", error)
                 return JobReport(url=url, error=str(error))
@@ -302,12 +394,17 @@ class AgeCatService:
         anime_name: str | None,
         on_progress: DownloadProgress | None,
         overwrite: bool,
+        partials: set[Path],
     ) -> JobReport:
         """Resolve fresh episode credentials and run one full download attempt."""
 
+        self._raise_if_cancelled()
         LOGGER.info("Resolving episode: %s", url)
         page = extractor.episode_page(url)
         output_dir = self._episode_output_dir(page.anime_name, anime_name)
+        partials.update(partial_paths(output_dir, page.title))
+        with self._partials_lock:
+            self._touched_dirs.add(output_dir)
 
         # Stop before the stream request mints credentials we would discard.
         existing = existing_download(output_dir, page.title, overwrite=overwrite)
@@ -315,6 +412,7 @@ class AgeCatService:
             self.circuit_breaker.record_success(host(url))
             return JobReport(url=url, result=skipped_result(page.unresolved_episode(), existing))
 
+        self._raise_if_cancelled()
         episode = extractor.resolve_stream(page)
         if episode.kind == "hls":
             result = download_hls_episode(
@@ -327,6 +425,7 @@ class AgeCatService:
                 segment_concurrency=self.options.segment_concurrency,
                 ffmpeg=self.options.ffmpeg,
                 filter_ads=self.options.filter_ads,
+                should_stop=self._cancelled.is_set,
             )
         else:
             result = download_episode(
@@ -338,6 +437,7 @@ class AgeCatService:
                 overwrite=overwrite,
                 progress=on_progress,
                 stream_retries=self.options.retries,
+                should_stop=self._cancelled.is_set,
             )
         self.circuit_breaker.record_success(host(url))
         LOGGER.info("%s episode: %s", result.status.title(), result.episode.title)
@@ -361,6 +461,45 @@ class AgeCatService:
             return error.retry_after
         base = DEFAULT_BLOCKED_BACKOFF if error.bot_mitigation else self.options.min_delay
         return full_jitter(base, attempt, cap=DEFAULT_MAX_BACKOFF)
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep, but wake and abort the episode as soon as the run is cancelled."""
+
+        if self._cancelled.wait(seconds):
+            raise DownloadCancelled("download run cancelled")
+
+    def _raise_if_cancelled(self) -> None:
+        """Abort before starting more network work for a cancelled run."""
+
+        if self._cancelled.is_set():
+            raise DownloadCancelled("download run cancelled")
+
+    def _remove_partial(self, part: Path) -> None:
+        """Delete one partial download and remember it for the run summary."""
+
+        try:
+            freed = discard_partial(part)
+        except OSError as error:
+            LOGGER.warning("Could not remove partial download %s: %s", part, error)
+            return
+        if freed is not None:
+            with self._partials_lock:
+                self.removed_partials.append((part, freed))
+
+    def _sweep_partials(self) -> None:
+        """Remove partial downloads left in the output folder, e.g. by an earlier killed run.
+
+        Folders this run used are cleared outright; other anime folders only lose
+        partials untouched for STALE_PARTIAL_AGE, since another run may be writing there.
+        """
+
+        with self._partials_lock:
+            touched = set(self._touched_dirs)
+        cutoff = time.time() - STALE_PARTIAL_AGE
+        for directory in sorted(touched.union(partial_folders(self.options.output_dir))):
+            modified_before = None if directory in touched else cutoff
+            for part in stale_partials(directory, modified_before=modified_before):
+                self._remove_partial(part)
 
     def _extractor(self, client: AgeCatClient) -> AgeExtractor:
         """Create an extractor that honors the configured mirror priority."""
@@ -404,6 +543,21 @@ def dedupe_jobs(jobs: list[EpisodeJob]) -> list[EpisodeJob]:
         seen.add(job.url)
         result.append(job)
     return result
+
+
+def shutdown_until_idle(executor: ThreadPoolExecutor) -> None:
+    """Drop queued jobs and wait for running ones to stop, even through repeated Ctrl-C.
+
+    Returning early would leave worker threads writing in the background; on
+    hosts like a-Shell they live inside the app, holding deleted files' space.
+    """
+
+    while True:
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+            return
+        except KeyboardInterrupt:
+            LOGGER.warning("Still closing active downloads; please wait")
 
 
 def close_client(client: object) -> None:
