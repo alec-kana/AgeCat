@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- 修复在 a-Shell 上启动即崩溃（`OSError: Cannot load native framework ... Crypto.Util._cpuid_c`）：a-Shell 自带的 pycryptodome 能导入但原生库加载失败。现在选择 AES 后端时会捕获加载错误并用 FIPS-197 向量自检，任何编译后端不可用时自动退回纯 Python 实现。
+
 ## 0.3.0 - 2026-10-23
 
 ### Added
