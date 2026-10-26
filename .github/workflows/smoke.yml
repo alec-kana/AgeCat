@@ -4,9 +4,11 @@ name: Smoke
 # third-party players, so it turns red when the site changes, moves domain,
 # or a mirror goes down. Mixing that signal into the PR gate would train
 # everyone to ignore a red check.
+#
+# Manual only: AGE answers GitHub-hosted runners with 403, so a schedule here
+# would fail every week. Run it from a home or mobile network instead (see
+# CONTRIBUTING.md), or dispatch it on a self-hosted runner.
 on:
-  schedule:
-    - cron: "0 3 * * 1"
   workflow_dispatch:
 
 jobs:
