@@ -3,7 +3,7 @@ from __future__ import annotations
 # AGE moves domains every few months; the "easy" domains 302 to the current one.
 DEFAULT_SITE_URL = "https://www.agedm.io"
 DOMAIN_RESOLVER_URLS = ("http://www.age.tv", "http://www.agedm.com", "http://agefans.com")
-DEFAULT_OUTPUT_DIR_NAME = "age"
+DEFAULT_OUTPUT_DIR_NAME = "anime"
 
 # Playlist tab keys in the order sources are tried. The VIP tab serves a
 # direct MP4 and is fastest; the m3u8 tabs are third-party HLS mirrors.
